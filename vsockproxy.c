@@ -30,6 +30,8 @@ struct client {
     int buf_size;
     uint64_t rxbytes;
     uint64_t txbytes;
+    uint64_t rxbytes_total;
+    uint64_t txbytes_total;
     double rxbegin;
     double txbegin;
 };
@@ -58,10 +60,10 @@ void close_connections(struct client *data)
     data = NULL;
 }
 
-void start_receiving(struct client *data, int epfd)
+void start_receive(struct client *data, int epfd)
 {
     struct epoll_event rx_ev;
-    rx_ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
+    rx_ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
     rx_ev.data.ptr = data;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, data->sock, &rx_ev) == -1) {
         printf("Failed to add to epoll: %s\n", strerror(errno));
@@ -70,12 +72,43 @@ void start_receiving(struct client *data, int epfd)
     }
 
     struct epoll_event tx_ev;
-    tx_ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
+    tx_ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
     tx_ev.data.ptr = data->sibling;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, data->sibling->sock, &tx_ev) == -1) {
         printf("Failed to add to epoll: %s\n", strerror(errno));
         close_connections(data->sibling);
         return;
+    }
+}
+
+int switch_mod(struct client *data, int epfd)
+{
+    struct epoll_event ev;
+    ev.events = EPOLLRDHUP | EPOLLHUP | EPOLLERR;
+    if (data->buf_size == 0)
+        ev.events |= EPOLLIN;
+    if (data->sibling->buf_size)
+        ev.events |= EPOLLOUT;
+    ev.data.ptr = data;
+    if (epoll_ctl(epfd, EPOLL_CTL_MOD, data->sock, &ev) == -1) {
+        printf("Failed to add to epoll: %s\n", strerror(errno));
+        close_connections(data);
+        return 0;
+    }
+    return 1;
+}
+
+void show_stat(struct client *data, int now)
+{
+    double rxtime_spent = timespec_now() - data->rxbegin;
+    double txtime_spent = timespec_now() - data->txbegin;
+    if (now || (rxtime_spent >= STAT_INTERVAL)) {
+        printf("Connection %d RX %ld bytes in %.2f seconds, transfer rate %.2f MB/s, rx total %ld\n", data->sock, data->rxbytes, rxtime_spent, data->rxbytes / rxtime_spent / 1000000, data->rxbytes_total);
+        printf("Connection %d TX %ld bytes in %.2f seconds, transfer rate %.2f MB/s, tx total %ld\n", data->sock, data->txbytes, txtime_spent, data->txbytes / txtime_spent / 1000000, data->txbytes_total);
+        data->rxbytes = 0;
+        data->rxbegin = timespec_now();
+        data->txbytes = 0;
+        data->txbegin = timespec_now();
     }
 }
 
@@ -110,9 +143,9 @@ int main(int argc, char **argv)
     }
 
     if (fcntl(listen_sock, F_SETFL, fcntl(listen_sock, F_GETFL, 0) | O_NONBLOCK) == -1) {
-		printf("Failed to set non block: %s\n", strerror(errno));
+        printf("Failed to set non block: %s\n", strerror(errno));
         exit(1);
-	}
+    }
 
     if (listen(listen_sock, 10) == -1) {
         printf("Failed to listen: %s\n", strerror(errno));
@@ -128,10 +161,10 @@ int main(int argc, char **argv)
     struct client *data = malloc(sizeof(struct client));
     data->sock = listen_sock;
     struct epoll_event listen_ev;
-	listen_ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-	listen_ev.data.ptr = data;
-	if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_sock, &listen_ev) == -1) {
-		printf("Failed to add to epoll: %s\n", strerror(errno));
+    listen_ev.events = EPOLLIN | EPOLLOUT;
+    listen_ev.data.ptr = data;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_sock, &listen_ev) == -1) {
+        printf("Failed to add to epoll: %s\n", strerror(errno));
         exit(1);
     }
 
@@ -146,18 +179,18 @@ int main(int argc, char **argv)
         for (int i = 0; i < nfds; i++) {
             struct client *data = (struct client *)events[i].data.ptr;
 
-			if (data->sock == listen_sock) {
+            if (data->sock == listen_sock) {
                 // New connection
-				struct sockaddr_vm clientaddr;
+                struct sockaddr_vm clientaddr;
                 socklen_t socklen = sizeof(clientaddr);
-				int rx_sock = accept(listen_sock, (struct sockaddr *)&clientaddr, &socklen);
+                int rx_sock = accept(listen_sock, (struct sockaddr *)&clientaddr, &socklen);
                 if (rx_sock == -1) {
                     printf("Failed to accept a new connection: %s\n", strerror(errno));
                     break;
                 }
 
                 printf("Accepted connection %d from cid %d on port %d \n", rx_sock, clientaddr.svm_cid, ntohs(clientaddr.svm_port));
-				if (fcntl(rx_sock, F_SETFL, fcntl(rx_sock, F_GETFL, 0) | O_NONBLOCK) == -1) {
+                if (fcntl(rx_sock, F_SETFL, fcntl(rx_sock, F_GETFL, 0) | O_NONBLOCK) == -1) {
                     printf("Failed to set non block: %s\n", strerror(errno));
                     close(rx_sock);
                     break;
@@ -216,14 +249,14 @@ int main(int argc, char **argv)
                 if (res == 0) {
                     printf("Connection %d to cid %d on port %d has been established\n", tx_sock, remote_cid, remote_port);
                     tx_data->connected = 1;
-                    start_receiving(rx_data, epfd);
+                    start_receive(rx_data, epfd);
                 }
                 else {
                     printf("Connection %d to cid %d on port %d is in progress\n", tx_sock, remote_cid, remote_port);
 
                     // Connection status will be reported in EPOLLOUT
                     struct epoll_event tx_ev;
-                    tx_ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
+                    tx_ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
                     tx_ev.data.ptr = tx_data;
                     if (epoll_ctl(epfd, EPOLL_CTL_ADD, tx_sock, &tx_ev) == -1) {
                         printf("Failed to add to epoll: %s\n", strerror(errno));
@@ -231,51 +264,52 @@ int main(int argc, char **argv)
                         continue;
                     }
                 }
-			}
+            }
             else {
                 if (events[i].events & EPOLLIN) {
-				    while (1) {
-                        int res = read(data->sock, data->buf + data->buf_size, RECV_BUF_SIZE - data->buf_size);
-                        if (res == 0) {
-                            //printf("End of file: %d\n", data->sock);
-                            break;
+                    if (data->buf_size)
+                        continue;
+
+                    int res = read(data->sock, data->buf + data->buf_size, RECV_BUF_SIZE - data->buf_size);
+                    if (res == 0) {
+                        //printf("End of file on %d\n", data->sock);
+                        close_connections(data);
+                        break;
+                    }
+                    else if (res < 0) {
+                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            printf("Read failed: %s\n", strerror(errno));
+                            close_connections(data);
                         }
-                        else if (res < 0) {
+                        continue;
+                    }
+                    else {
+                        data->buf_size += res;
+                        data->rxbytes += res;
+                        data->rxbytes_total += res;
+
+                        int res = send(data->sibling->sock, data->buf, data->buf_size, 0);
+                        if (res <= 0) {
                             if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                                printf("Read failed: %s\n", strerror(errno));
+                                printf("Failed to send from epollin (%d): %s\n", errno, strerror(errno));
                                 close_connections(data);
+                                break;
                             }
-                            break;
                         }
                         else {
-                            data->buf_size += res;
-                            int res = send(data->sibling->sock, data->buf, data->buf_size, 0);
-                            if (res <= 0) {
-                                if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                                    printf("Failed to send from epollin (%d): %s\n", errno, strerror(errno));
-                                    close_connections(data);
-                                    break;
-                                }
-                            }
-                            else {
-                                data->buf_size -= res;
-                                memmove(data->buf, data->buf + res, data->buf_size);
-                                data->sibling->txbytes += res;
-                            }
-
-                            // Calculate statistics
-                            data->rxbytes += res;
-                            double rxtime_spent = timespec_now() - data->rxbegin;
-                            double txtime_spent = timespec_now() - data->txbegin;
-                            if (rxtime_spent >= STAT_INTERVAL) {
-                                printf("Connection %d RX %ld bytes in %.2f seconds, transfer rate %.2f MB/s, data size %d\n", data->sock, data->rxbytes, rxtime_spent, data->rxbytes / rxtime_spent / 1000000, res);
-                                printf("Connection %d TX %ld bytes in %.2f seconds, transfer rate %.2f MB/s, data size %d\n", data->sock, data->txbytes, txtime_spent, data->txbytes / txtime_spent / 1000000, res);
-                                data->rxbytes = 0;
-                                data->rxbegin = timespec_now();
-                                data->txbytes = 0;
-                                data->txbegin = timespec_now();
-                            }
+                            data->buf_size -= res;
+                            memmove(data->buf, data->buf + res, data->buf_size);
+                            data->sibling->txbytes += res;
+                            data->sibling->txbytes_total += res;
                         }
+
+                        if (data->buf_size) {
+                            if (!switch_mod(data, epfd) || !switch_mod(data->sibling, epfd))
+                                break;
+                        }
+
+                        show_stat(data, 0);
+                        show_stat(data->sibling, 0);
                     }
                 }
                 if (events[i].events & EPOLLOUT) {
@@ -301,27 +335,39 @@ int main(int argc, char **argv)
                             close_connections(data);
                         }
                         else
-                            start_receiving(data, epfd);
+                            start_receive(data, epfd);
                     }
                     else {
-                        while (data->sibling->buf_size > 0) {
+                        if (data->sibling->buf_size > 0) {
                             int res = send(data->sock, data->sibling->buf, data->sibling->buf_size, 0);
                             if (res <= 0) {
                                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                                     printf("Failed to send from epollout (%d): %s\n", errno, strerror(errno));
                                     close_connections(data);
                                 }
-                                break;
+                                continue;
                             }
                             else {
                                 data->sibling->buf_size -= res;
                                 memmove(data->sibling->buf, data->sibling->buf + res, data->sibling->buf_size);
+                                data->txbytes += res;
+                                data->txbytes_total += res;
                             }
                         }
+
+                        if (data->sibling->buf_size == 0) {
+                            if (!switch_mod(data, epfd) || !switch_mod(data->sibling, epfd))
+                                break;
+                        }
+
+                        show_stat(data, 0);
+                        show_stat(data->sibling, 0);
                     }
                 }
                 if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
                     //printf("Сonnection %d closed\n", data->sock);
+                    show_stat(data, 1);
+                    show_stat(data->sibling, 1);
                     close_connections(data);
                 }
             }
