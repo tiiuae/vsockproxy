@@ -6,6 +6,19 @@ This tool makes it possible to use vsock for guest to guest communication.
 
 It listens for incoming connections on host, connects to the guest virtual machine and forwards data in both directions.
 
+# Building
+
+Initialize the build:
+```
+meson setup build
+cd build
+```
+
+Build the executable:
+```
+meson compile
+```
+
 # Usage
 
 ```
