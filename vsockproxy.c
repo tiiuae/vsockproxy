@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <arpa/inet.h>
+#include <signal.h>
 
 #define MAX_EVENTS 64
 #define RECV_BUF_SIZE (1024 * 1024)
@@ -112,15 +113,48 @@ void show_stat(struct client *data, int now)
     }
 }
 
+volatile sig_atomic_t stop = 0;
+
+void signal_handler(int signal)
+{
+    stop = 1;
+}
+
 int main(int argc, char **argv)
 {
+    int ret = EXIT_FAILURE;
+
     if (argc < 4) {
         printf("usage: vsockproxy <local_port> <remote_cid> <remote_port>\n");
-        exit(1);
+        return ret;
     }
 
     // Disable stdout buffering so that journald can show live data
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    // Setup signal handler
+    struct sigaction sa;
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        printf("Failed to change SIGINT action: %s\n", strerror(errno));
+        return ret;
+    }
+    if (sigaction(SIGTERM, &sa, NULL) == -1) {
+        printf("Failed to change SIGTERM action: %s\n", strerror(errno));
+        return ret;
+    }
+
+    // Block signals
+    sigset_t sigset, oldset;
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIGINT);
+    sigaddset(&sigset, SIGTERM);
+    if (sigprocmask(SIG_BLOCK, &sigset, &oldset) == -1) {
+        printf("Failed to block signals: %s\n", strerror(errno));
+        return ret;
+    }
 
     int local_port = atoi(argv[1]);
     int remote_cid = atoi(argv[2]);
@@ -130,7 +164,7 @@ int main(int argc, char **argv)
     int listen_sock = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (listen_sock == -1) {
         printf("Failed to create socket: %s\n", strerror(errno));
-        exit(1);
+        return ret;
     }
 
     struct sockaddr_vm addr = {};
@@ -139,23 +173,23 @@ int main(int argc, char **argv)
     addr.svm_cid = VMADDR_CID_ANY;
     if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
         printf("Failed to bind: %s\n", strerror(errno));
-        exit(1);
+        return ret;
     }
 
     if (fcntl(listen_sock, F_SETFL, fcntl(listen_sock, F_GETFL, 0) | O_NONBLOCK) == -1) {
         printf("Failed to set non block: %s\n", strerror(errno));
-        exit(1);
+        return ret;
     }
 
     if (listen(listen_sock, 10) == -1) {
         printf("Failed to listen: %s\n", strerror(errno));
-        exit(1);
+        return ret;
     }
 
     int epfd = epoll_create(1);
     if (epfd == -1) {
         printf("Failed to create epoll: %s\n", strerror(errno));
-        exit(1);
+        return ret;
     }
 
     struct client *data = malloc(sizeof(struct client));
@@ -165,14 +199,20 @@ int main(int argc, char **argv)
     listen_ev.data.ptr = data;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, listen_sock, &listen_ev) == -1) {
         printf("Failed to add to epoll: %s\n", strerror(errno));
-        exit(1);
+        return ret;
     }
 
     struct epoll_event events[MAX_EVENTS];
-    while (1) {
-        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
-        if (nfds == -1) {
+    ret = EXIT_SUCCESS;
+    while (!stop) {
+        sigset_t sigset_empty;
+        sigemptyset(&sigset_empty);
+        int nfds = epoll_pwait(epfd, events, MAX_EVENTS, -1, &sigset_empty);
+        if (nfds < 0) {
+            if (errno == EINTR)
+                continue;
             printf("Failed to wait: %s\n", strerror(errno));
+            ret = EXIT_FAILURE;
             break;
         }
 
@@ -375,5 +415,5 @@ int main(int argc, char **argv)
     }
     close(epfd);
     printf("vsockproxy finished\n");
-    return 0;
+    return ret;
 }
