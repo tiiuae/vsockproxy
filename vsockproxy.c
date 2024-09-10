@@ -61,7 +61,7 @@ void close_connections(struct client *data)
     data = NULL;
 }
 
-void start_receive(struct client *data, int epfd)
+int start_receive(struct client *data, int epfd)
 {
     struct epoll_event rx_ev;
     rx_ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
@@ -69,7 +69,7 @@ void start_receive(struct client *data, int epfd)
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, data->sock, &rx_ev) == -1) {
         printf("Failed to add to epoll: %s\n", strerror(errno));
         close_connections(data);
-        return;
+        return 0;
     }
 
     struct epoll_event tx_ev;
@@ -78,8 +78,10 @@ void start_receive(struct client *data, int epfd)
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, data->sibling->sock, &tx_ev) == -1) {
         printf("Failed to add to epoll: %s\n", strerror(errno));
         close_connections(data->sibling);
-        return;
+        return 0;
     }
+
+    return 1;
 }
 
 int switch_mod(struct client *data, int epfd)
@@ -117,6 +119,7 @@ volatile sig_atomic_t stop = 0;
 
 void signal_handler(int signal)
 {
+    (void)signal;
     stop = 1;
 }
 
@@ -289,7 +292,8 @@ int main(int argc, char **argv)
                 if (res == 0) {
                     printf("Connection %d to cid %d on port %d has been established\n", tx_sock, remote_cid, remote_port);
                     tx_data->connected = 1;
-                    start_receive(rx_data, epfd);
+                    if (!start_receive(rx_data, epfd))
+                        continue;
                 }
                 else {
                     printf("Connection %d to cid %d on port %d is in progress\n", tx_sock, remote_cid, remote_port);
@@ -373,9 +377,12 @@ int main(int argc, char **argv)
                         if (epoll_ctl(epfd, EPOLL_CTL_DEL, data->sock, NULL) == -1) {
                             printf("Failed to delete from epoll: %s\n", strerror(errno));
                             close_connections(data);
+                            continue;
                         }
-                        else
-                            start_receive(data, epfd);
+                        else {
+                            if (!start_receive(data, epfd))
+                                continue;
+                        }
                     }
                     else {
                         if (data->sibling->buf_size > 0) {
