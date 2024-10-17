@@ -127,8 +127,8 @@ int main(int argc, char **argv)
 {
     int ret = EXIT_FAILURE;
 
-    if (argc < 4) {
-        printf("usage: vsockproxy <local_port> <remote_cid> <remote_port>\n");
+    if (argc < 5) {
+        printf("usage: vsockproxy <local_port> <remote_cid> <remote_port> <allowed_cid>\n");
         return ret;
     }
 
@@ -162,7 +162,8 @@ int main(int argc, char **argv)
     int local_port = atoi(argv[1]);
     int remote_cid = atoi(argv[2]);
     int remote_port = atoi(argv[3]);
-    printf("vsockproxy started (local port %d, remote cid %d, remote port %d)\n", local_port, remote_cid, remote_port);
+    int allowed_cid = atoi(argv[4]);
+    printf("vsockproxy started (local port %d, remote cid %d, remote port %d, allowed_cid %d)\n", local_port, remote_cid, remote_port, allowed_cid);
 
     int listen_sock = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (listen_sock == -1) {
@@ -233,6 +234,13 @@ int main(int argc, char **argv)
                 }
 
                 printf("Accepted connection %d from cid %d on port %d \n", rx_sock, clientaddr.svm_cid, ntohs(clientaddr.svm_port));
+
+                if (allowed_cid && (allowed_cid != clientaddr.svm_cid)) {
+                    printf("Connection %d from cid %d is not allowed, closing.\n", rx_sock, clientaddr.svm_cid);
+                    close(rx_sock);
+                    continue;
+                }
+
                 if (fcntl(rx_sock, F_SETFL, fcntl(rx_sock, F_GETFL, 0) | O_NONBLOCK) == -1) {
                     printf("Failed to set non block: %s\n", strerror(errno));
                     close(rx_sock);
